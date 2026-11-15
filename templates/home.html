@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Account ready{% endblock %}
+{% block content %}
+  <h1>Account ready</h1>
+  <p>Signed in as <strong>{{ username }}</strong> ({{ email }}).</p>
+  <p class="hint">Login and movie recommendations come in the next step.</p>
+  <p><a href="/logout">Log out</a></p>
+{% endblock %}
