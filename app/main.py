@@ -1,6 +1,11 @@
+import base64
+import hashlib
 import re
+import secrets
 from pathlib import Path
+from urllib.parse import urlencode
 
+import httpx
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +16,9 @@ from .config import settings
 from .supabase_client import admin_client, auth_client
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
@@ -190,6 +198,131 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     request.session["email"] = email
     request.session["username"] = stored_username
     return RedirectResponse("/", status_code=303)
+
+
+def _pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+@app.get("/auth/google/start")
+def google_start(request: Request):
+    if not settings.google_client_id or not settings.google_client_secret:
+        return render_error(
+            request, "auth_error.html", "Google login is not configured yet.", 503
+        )
+
+    state = secrets.token_urlsafe(32)
+    verifier, challenge = _pkce_pair()
+    request.session["oauth_state"] = state
+    request.session["oauth_verifier"] = verifier
+
+    query = urlencode(
+        {
+            "client_id": settings.google_client_id,
+            "redirect_uri": settings.google_redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": "select_account",
+        }
+    )
+    return RedirectResponse(f"{GOOGLE_AUTH_URL}?{query}", status_code=303)
+
+
+@app.get("/auth/google/callback")
+def google_callback(request: Request, code: str = "", state: str = ""):
+    expected_state = request.session.pop("oauth_state", "")
+    verifier = request.session.pop("oauth_verifier", "")
+
+    if (
+        not code
+        or not state
+        or not expected_state
+        or not verifier
+        or not secrets.compare_digest(state, expected_state)
+    ):
+        return render_error(
+            request,
+            "auth_error.html",
+            "This Google login attempt is invalid or expired. Try again.",
+            400,
+        )
+
+    try:
+        token_response = httpx.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uri": settings.google_redirect_uri,
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": verifier,
+            },
+            timeout=10,
+        )
+        token_response.raise_for_status()
+        id_token = token_response.json().get("id_token")
+    except Exception:
+        return render_error(
+            request,
+            "auth_error.html",
+            "Google login failed while contacting Google. Try again.",
+            400,
+        )
+
+    if not id_token:
+        return render_error(
+            request, "auth_error.html", "Google did not return an identity token.", 400
+        )
+
+    try:
+        result = auth_client.auth.sign_in_with_id_token(
+            {"provider": "google", "token": id_token}
+        )
+    except Exception:
+        return render_error(
+            request,
+            "auth_error.html",
+            "Google login could not be verified. Try again.",
+            400,
+        )
+
+    user = getattr(result, "user", None)
+    if user is None:
+        return render_error(
+            request, "auth_error.html", "Google login could not be verified.", 400
+        )
+
+    request.session.clear()
+    request.session["user_id"] = user.id
+    request.session["email"] = user.email
+
+    try:
+        profile = (
+            admin_client.table("profiles")
+            .select("username")
+            .eq("id", user.id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return render_error(
+            request,
+            "auth_error.html",
+            "Login is temporarily unavailable. Try again shortly.",
+            503,
+        )
+
+    if profile.data:
+        request.session["username"] = profile.data[0]["username"]
+        return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/choose-username", status_code=303)
 
 
 @app.get("/logout")

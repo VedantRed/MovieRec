@@ -22,6 +22,9 @@ class Settings:
     supabase_service_role_key: str
     session_secret: str
     site_url: str
+    google_client_id: str
+    google_client_secret: str
+    google_redirect_uri: str
 
 
 def load_settings() -> Settings:
@@ -38,6 +41,11 @@ def load_settings() -> Settings:
         supabase_service_role_key=os.environ["SUPABASE_SERVICE_ROLE_KEY"],
         session_secret=os.environ["SESSION_SECRET"],
         site_url=os.environ.get("SITE_URL", "http://localhost:8000"),
+        google_client_id=os.environ.get("GOOGLE_CLIENT_ID", ""),
+        google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+        google_redirect_uri=os.environ.get(
+            "GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback"
+        ),
     )
 
 
