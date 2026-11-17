@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import re
 import secrets
 from pathlib import Path
@@ -207,6 +208,17 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
+def _id_token_email(id_token: str) -> str:
+    try:
+        payload = id_token.split(".")[1]
+        padded = payload + "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except Exception:
+        return ""
+    email = claims.get("email")
+    return email.strip().lower() if isinstance(email, str) else ""
+
+
 @app.get("/auth/google/start")
 def google_start(request: Request):
     if not settings.google_client_id or not settings.google_client_secret:
@@ -279,6 +291,35 @@ def google_callback(request: Request, code: str = "", state: str = ""):
     if not id_token:
         return render_error(
             request, "auth_error.html", "Google did not return an identity token.", 400
+        )
+
+    email = _id_token_email(id_token)
+    if not email:
+        return render_error(
+            request, "auth_error.html", "Google did not return an email address.", 400
+        )
+
+    try:
+        lookup = admin_client.rpc(
+            "auth_identities", {"lookup_email": email}
+        ).execute()
+    except Exception:
+        return render_error(
+            request,
+            "auth_error.html",
+            "Login is temporarily unavailable. Try again shortly.",
+            503,
+        )
+
+    providers = []
+    if lookup.data:
+        providers = lookup.data[0].get("providers") or []
+    if providers and "google" not in providers:
+        return render_error(
+            request,
+            "auth_error.html",
+            "Google login could not be verified. Try again.",
+            400,
         )
 
     try:
